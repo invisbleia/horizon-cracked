@@ -65,6 +65,26 @@ on:
         description: Optional Fixed section; blank keeps the automatic pull request list
         type: string
         required: false
+      build_linux:
+        description: Build Linux (x86_64)
+        type: boolean
+        default: true
+      build_macos:
+        description: Build macOS (Apple Silicon)
+        type: boolean
+        default: true
+      build_macos_x64:
+        description: Build macOS (Intel)
+        type: boolean
+        default: true
+      build_windows:
+        description: Build Windows (x64)
+        type: boolean
+        default: true
+      build_windows_arm64:
+        description: Build Windows (ARM64)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -76,6 +96,12 @@ concurrency:
 env:
   # Test runs never reach the telemetry server: no live-count ping, no uploads (docs/telemetry.md).
   HORIZON_TELEMETRY_URL: "off"
+  # Platform builds, picked by hand (workflow_dispatch) or all of them on pushes and the schedule.
+  BUILD_LINUX: ${{ github.event_name != 'workflow_dispatch' && 'true' || (inputs.build_linux && 'true' || 'false') }}
+  BUILD_MACOS: ${{ github.event_name != 'workflow_dispatch' && 'true' || (inputs.build_macos && 'true' || 'false') }}
+  BUILD_MACOS_X64: ${{ github.event_name != 'workflow_dispatch' && 'true' || (inputs.build_macos_x64 && 'true' || 'false') }}
+  BUILD_WINDOWS: ${{ github.event_name != 'workflow_dispatch' && 'true' || (inputs.build_windows && 'true' || 'false') }}
+  BUILD_WINDOWS_ARM64: ${{ github.event_name != 'workflow_dispatch' && 'true' || (inputs.build_windows_arm64 && 'true' || 'false') }}
 
 jobs:
   decide:
@@ -138,10 +164,17 @@ jobs:
 
   build:
     needs: decide
-    if: needs.decide.outputs.release == 'true'
+    if: needs.decide.outputs.release == 'true' &&
+        (matrix.name != 'linux' || env.BUILD_LINUX == 'true') &&
+        (matrix.name != 'macos' || env.BUILD_MACOS == 'true') &&
+        (matrix.name != 'macos-x64' || env.BUILD_MACOS_X64 == 'true') &&
+        (matrix.name != 'windows' || env.BUILD_WINDOWS == 'true') &&
+        (matrix.name != 'windows-arm64' || env.BUILD_WINDOWS_ARM64 == 'true')
     name: build ${{ matrix.name }}
-    # Start every platform build together. Only the optional Windows ARM64 build may fail without
-    # blocking the release; macOS assets are required, so a failed Mac build must stop publishing.
+    # Start every platform build together (a workflow dispatch may unselect any of them). Only the
+    # optional Windows ARM64 build may fail without blocking the release; macOS assets are required,
+    # so a failed Mac build must stop publishing. An unselected platform is simply not built: the
+    # release's build list says so, and its launchers stay on their version until it ships.
     continue-on-error: ${{ matrix.name == 'windows-arm64' }}
     strategy:
       fail-fast: false
