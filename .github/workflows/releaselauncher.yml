@@ -114,6 +114,7 @@ jobs:
       tag: ${{ steps.decide.outputs.tag }}
       head: ${{ steps.decide.outputs.head }}
       version: ${{ steps.decide.outputs.version }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -141,6 +142,51 @@ jobs:
             echo "publish=$(jq -r '.release' decision.json)" >> "$GITHUB_OUTPUT"
           fi
 
+      - id: matrix
+        # The platforms this run builds (env above): every one on pushes and the schedule, the
+        # dispatch's checkboxes when run by hand.
+        env:
+          L: ${{ env.BUILD_LINUX }}
+          M: ${{ env.BUILD_MACOS }}
+          MX: ${{ env.BUILD_MACOS_X64 }}
+          W: ${{ env.BUILD_WINDOWS }}
+          WA: ${{ env.BUILD_WINDOWS_ARM64 }}
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, os
+          table = {
+              "linux": {"name": "linux", "os": "ubuntu-22.04",
+                        "asset": "horizon-launcher-linux-x86_64.tar.gz", "binary": "horizon-launcher"},
+              "macos": {"name": "macos", "mac": True,
+                        "asset": "horizon-launcher-macos-arm64.zip", "binary": "horizon-launcher",
+                        "mac_arch": "arm64"},
+              "macos-x64": {"name": "macos-x64", "mac": True, "target": "x86_64-apple-darwin",
+                            "asset": "horizon-launcher-macos-x64.zip", "binary": "horizon-launcher",
+                            "mac_arch": "x64"},
+              "windows": {"name": "windows", "os": "windows-latest",
+                          "asset": "horizon-launcher-windows-x64.zip", "binary": "horizon-launcher.exe",
+                          "pe_arch": "x64", "setup_asset": "horizon-launcher-setup.exe",
+                          # The C runtime linked in: without it the launcher asks for VCRUNTIME140.dll,
+                          # which only the Visual C++ redistributable installs.
+                          "rustflags": "-C target-feature=+crt-static"},
+              "windows-arm64": {"name": "windows-arm64", "os": "windows-latest",
+                                "target": "aarch64-pc-windows-msvc",
+                                "asset": "horizon-launcher-windows-arm64.zip",
+                                "binary": "horizon-launcher.exe", "pe_arch": "arm64",
+                                "setup_asset": "horizon-launcher-setup-arm64.exe",
+                                # The C runtime linked in, so the standalone ARM64 launcher needs no
+                                # redistributable.
+                                "rustflags": "-C target-feature=+crt-static"},
+          }
+          wanted = {"linux": "L", "macos": "M", "macos-x64": "MX",
+                    "windows": "W", "windows-arm64": "WA"}
+          chosen = [entry for name, entry in table.items()
+                    if os.environ[wanted[name]] == "true"]
+          if not chosen:
+              raise SystemExit("::error::no platform is selected to build")
+          print(f"matrix={json.dumps({'include': chosen})}")
+          EOF
+
   test:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_only == true && inputs.force != true }}
     runs-on: ubuntu-22.04
@@ -164,56 +210,18 @@ jobs:
 
   build:
     needs: decide
-    if: needs.decide.outputs.release == 'true' &&
-        (matrix.name != 'linux' || env.BUILD_LINUX == 'true') &&
-        (matrix.name != 'macos' || env.BUILD_MACOS == 'true') &&
-        (matrix.name != 'macos-x64' || env.BUILD_MACOS_X64 == 'true') &&
-        (matrix.name != 'windows' || env.BUILD_WINDOWS == 'true') &&
-        (matrix.name != 'windows-arm64' || env.BUILD_WINDOWS_ARM64 == 'true')
+    if: needs.decide.outputs.release == 'true'
     name: build ${{ matrix.name }}
-    # Start every platform build together (a workflow dispatch may unselect any of them). Only the
-    # optional Windows ARM64 build may fail without blocking the release; macOS assets are required,
-    # so a failed Mac build must stop publishing. An unselected platform is simply not built: the
-    # release's build list says so, and its launchers stay on their version until it ships.
+    # Start every selected platform build together (a workflow dispatch picks them; decide outputs the
+    # matrix). Only the optional Windows ARM64 build may fail without blocking the release; macOS
+    # assets are required, so a failed Mac build must stop publishing. An unselected platform is
+    # simply not built: the release's build list says so, and its launchers stay on their version
+    # until it ships.
     continue-on-error: ${{ matrix.name == 'windows-arm64' }}
     strategy:
       fail-fast: false
       max-parallel: 5
-      matrix:
-        include:
-          - name: linux
-            os: ubuntu-22.04
-            asset: horizon-launcher-linux-x86_64.tar.gz
-            binary: horizon-launcher
-          - name: macos
-            mac: true
-            asset: horizon-launcher-macos-arm64.zip
-            binary: horizon-launcher
-            mac_arch: arm64
-          - name: macos-x64
-            mac: true
-            target: x86_64-apple-darwin
-            asset: horizon-launcher-macos-x64.zip
-            binary: horizon-launcher
-            mac_arch: x64
-          - name: windows
-            os: windows-latest
-            asset: horizon-launcher-windows-x64.zip
-            binary: horizon-launcher.exe
-            pe_arch: x64
-            setup_asset: horizon-launcher-setup.exe
-            # The C runtime linked in: without it the launcher asks for VCRUNTIME140.dll,
-            # which only the Visual C++ redistributable installs.
-            rustflags: -C target-feature=+crt-static
-          - name: windows-arm64
-            os: windows-latest
-            target: aarch64-pc-windows-msvc
-            asset: horizon-launcher-windows-arm64.zip
-            binary: horizon-launcher.exe
-            pe_arch: arm64
-            setup_asset: horizon-launcher-setup-arm64.exe
-            # The C runtime linked in, so the standalone ARM64 launcher needs no redistributable.
-            rustflags: -C target-feature=+crt-static
+      matrix: ${{ fromJSON(needs.decide.outputs.matrix) }}
     runs-on: ${{ matrix.name == 'windows-arm64' && (vars.WINDOWS_ARM_RUNNER || 'windows-11-vs2026-arm') || matrix.mac && 'macos-latest' || matrix.os }}
     # Notarizing the app and then the .dmg can take a few minutes each.
     timeout-minutes: ${{ matrix.mac && 60 || 40 }}
