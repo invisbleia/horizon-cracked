@@ -265,5 +265,4 @@ impl Launcher {
             .occlude()
             .child(card)
     }
-
 }
