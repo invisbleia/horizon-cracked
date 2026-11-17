@@ -1,0 +1,113 @@
+name: buildmacos
+
+on:
+  workflow_dispatch:
+    inputs:
+      msa_client_id:
+        description: Microsoft app client ID (optional; defaults to the repository variable)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build macOS arm64 test DMG
+    # macos-14 and macos-15 runners are Apple Silicon (arm64). macos-13 is Intel.
+    runs-on: macos-14
+    timeout-minutes: 90
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      HORIZON_TELEMETRY_URL: "off"
+      HORIZON_MSA_CLIENT_ID: ${{ inputs.msa_client_id || vars.HORIZON_MSA_CLIENT_ID }}
+      TARGET: aarch64-apple-darwin
+      BIN: launcher/target/aarch64-apple-darwin/release
+      DIST: launcher/dist
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: launcher
+          shared-key: buildmacos-launcher-arm64
+
+      - name: Build the launcher
+        working-directory: launcher
+        shell: bash
+        run: cargo build --release --locked --target "$TARGET" ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"}
+
+      - name: Prepare the setup executable
+        working-directory: launcher
+        shell: bash
+        run: cp "target/$TARGET/release/horizon-launcher" "target/$TARGET/release/horizon-launcher-setup"
+
+      - name: Ad-hoc codesign the binaries
+        shell: bash
+        run: |
+          for bin in "$BIN/horizon-launcher" "$BIN/horizon-launcher-setup"; do
+            codesign --force --options runtime --sign - "$bin"
+            codesign --verify --strict --verbose=2 "$bin"
+            file "$bin" | grep -q arm64 || { echo "::error::$bin is not arm64"; exit 1; }
+          done
+
+      - name: Build the DMG
+        shell: bash
+        run: |
+          mkdir -p "$DIST" staging
+          cp "$BIN/horizon-launcher" staging/
+          cp "$BIN/horizon-launcher-setup" staging/
+          ln -s /Applications staging/Applications
+          hdiutil create -volname "Horizon Launcher" -srcfolder staging \
+            -ov -format UDZO "$DIST/horizon-launcher-arm64.dmg"
+          hdiutil verify "$DIST/horizon-launcher-arm64.dmg"
+          rm -rf staging
+
+      - name: Sign the checksums (SHA256SUMS, SHA256SUMS.sig)
+        shell: bash
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.LAUNCHER_RELEASE_SIGNING_KEY }}
+        run: |
+          if [[ -z "$RELEASE_SIGNING_KEY" ]]; then
+            echo "::error::Set the LAUNCHER_RELEASE_SIGNING_KEY Actions secret to the base64 Ed25519 private key for launcher-release-keys.txt."
+            exit 1
+          fi
+          bash tools/ci/sign_release.sh buildmacos-test "$DIST/horizon-launcher-arm64.dmg"
+
+      - name: The signature, checked as launchers check it
+        shell: bash
+        run: |
+          key=()
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ -z "$line" || "$line" == \#* ]] && continue
+            key+=(--key "$line")
+          done < crates/horizon-release-sign/launcher-release-keys.txt
+          if [[ ${#key[@]} -eq 0 ]]; then
+            echo "::error::launcher-release-keys.txt has no trusted launcher release keys."
+            exit 1
+          fi
+          cargo run --locked --quiet -p horizon-release-sign -- verify \
+            --tag buildmacos-test "${key[@]}" "$DIST"
+
+      - name: Upload launcher DMG
+        uses: actions/upload-artifact@v7
+        with:
+          name: horizon-launcher-update-macos-arm64
+          path: launcher/dist/horizon-launcher-arm64.dmg
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: signature-macos-arm64
+          path: launcher/dist/SHA256SUMS*
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Report artifact
+        run: echo "Download horizon-launcher-update-macos-arm64, open the DMG, and drag the app out. The signature-macos-arm64 artifact carries SHA256SUMS and SHA256SUMS.sig, checked above as launchers check them. The build is ad-hoc signed only, so on first run use right-click > Open, or 'xattr -dr com.apple.quarantine /path/to/Horizon.app'."
