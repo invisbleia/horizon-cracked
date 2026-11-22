@@ -61,6 +61,7 @@ pub fn start(dir: &Path) -> Result<(), String> {
     );
     let mut child = command.spawn().map_err(|e| e.to_string())?;
     let deadline = Instant::now() + START_TIMEOUT;
+    let mut started = false;
     print!("Starting");
     loop {
         if let Ok(Some(status)) = child.try_wait() {
@@ -75,14 +76,22 @@ pub fn start(dir: &Path) -> Result<(), String> {
         if endpoint.exists()
             && let Ok(Some(client)) = Client::open(dir)
             && let Ok(status) = client.call("GET", "/api/v1/status", None)
-            && status["phase"] == "running"
         {
-            println!(
-                "\nThe server is running (pid {}). `horizon-server status` shows how it does, \
-                 `horizon-server stop` stops it.",
-                child.id()
-            );
-            return Ok(());
+            match start_progress(&status, &mut started, None) {
+                Ok(true) => {
+                    println!(
+                        "\nThe server is running (pid {}). `horizon-server status` shows how it does, \
+                         `horizon-server stop` stops it.",
+                        child.id()
+                    );
+                    return Ok(());
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    println!();
+                    return Err(format!("{e}; see {}", log_path.display()));
+                }
+            }
         }
         if Instant::now() > deadline {
             println!();
@@ -124,13 +133,11 @@ pub fn stop(dir: &Path, restart: bool) -> Result<(), String> {
 /// Waits until the game is up: a new one when `replaced` is the engine's pid before a restart.
 fn wait_running(client: &Client, replaced: Option<u64>) -> Result<(), String> {
     let deadline = Instant::now() + START_TIMEOUT;
+    let mut started = replaced.is_some();
     loop {
         let status = client.call("GET", "/api/v1/status", None)?;
-        if status["phase"] == "running" && status["engine_pid"].as_u64() != replaced {
+        if start_progress(&status, &mut started, replaced)? {
             return Ok(());
-        }
-        if status["phase"] == "stopping" || (status["phase"] == "stopped" && replaced.is_some()) {
-            return Err("the server is stopping".into());
         }
         if Instant::now() > deadline {
             return Err(format!(
@@ -144,6 +151,28 @@ fn wait_running(client: &Client, replaced: Option<u64>) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
+}
+
+/// Whether startup has completed, or the game stopped after startup began.
+fn start_progress(
+    status: &Value,
+    started: &mut bool,
+    replaced: Option<u64>,
+) -> Result<bool, String> {
+    let phase = status["phase"].as_str().unwrap_or_default();
+    if phase == "running" && status["engine_pid"].as_u64() != replaced {
+        return Ok(true);
+    }
+    if matches!(phase, "starting" | "restarting") {
+        *started = true;
+    }
+    if phase == "stopping" {
+        return Err("the server is stopping".into());
+    }
+    if phase == "stopped" && *started {
+        return Err("the game stopped before it was up; `horizon-server logs` shows why".into());
+    }
+    Ok(false)
 }
 
 /// `cmd`: one console command, and what it printed.
@@ -625,6 +654,24 @@ pub fn logs(dir: &Path, follow: bool, count: usize) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn start_wait_does_not_wait_for_a_stopped_supervisor_after_startup_failed() {
+        let mut started = false;
+        assert_eq!(
+            start_progress(&json!({ "phase": "stopped" }), &mut started, None),
+            Ok(false),
+            "a stopped supervisor may not have received the start request yet"
+        );
+        assert_eq!(
+            start_progress(&json!({ "phase": "starting" }), &mut started, None),
+            Ok(false)
+        );
+        assert_eq!(
+            start_progress(&json!({ "phase": "stopped" }), &mut started, None),
+            Err("the game stopped before it was up; `horizon-server logs` shows why".into())
+        );
+    }
 
     #[test]
     fn status_reads_well() {

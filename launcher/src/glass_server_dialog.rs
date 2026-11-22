@@ -32,6 +32,12 @@ fn valid_name(name: &str) -> bool {
     (3..=16).contains(&name.len()) && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+fn has_friend(friends: &[String], name: &str) -> bool {
+    friends
+        .iter()
+        .any(|friend| friend.eq_ignore_ascii_case(name))
+}
+
 /// A click that changes the draft with `f`.
 fn set(
     cx: &mut Context<Launcher>,
@@ -618,33 +624,31 @@ impl Launcher {
                             )
                         }),
                 );
-            if i > 0 {
-                let gone = name.clone();
-                chip = chip.child(
-                    ui::icon_button(
-                        SharedString::from(format!("create-friend-remove-{i}")),
-                        "cancel-01",
-                        28.,
-                        14.,
-                        8.,
-                        false,
-                        &t,
-                    )
-                    .mr(px(6.))
-                    .on_click(cx.listener(
-                        move |this, _: &ClickEvent, _, cx| {
-                            if let Some(c) = &mut this.servers.create {
-                                c.friends.retain(|f| f != &gone);
-                            }
-                            cx.notify();
-                        },
-                    )),
-                );
-            }
+            let gone = name.clone();
+            chip = chip.child(
+                ui::icon_button(
+                    SharedString::from(format!("create-friend-remove-{i}")),
+                    "cancel-01",
+                    28.,
+                    14.,
+                    8.,
+                    false,
+                    &t,
+                )
+                .mr(px(6.))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    if let Some(c) = &mut this.servers.create {
+                        c.friends.retain(|f| f != &gone);
+                    }
+                    cx.notify();
+                })),
+            );
             chips = chips.child(chip);
         }
         let typed = self.servers.value(Field::Players).trim().to_string();
-        let ok = valid_name(&typed) && !friends.contains(&typed);
+        let duplicate = has_friend(friends, &typed);
+        let valid = valid_name(&typed);
+        let ok = valid && !duplicate;
         let focused = self.servers.focused == Some(Field::Players);
         let add = keyboard(
             div()
@@ -672,16 +676,35 @@ impl Launcher {
         } else {
             add.opacity(0.4).cursor_default()
         };
+        let input = div()
+            .flex()
+            .items_center()
+            .h(px(44.))
+            .pr(px(6.))
+            .rounded(px(radius::ROW))
+            .bg(white(if focused { fill::BUTTON } else { 0.04 }))
+            .child(self.field(Field::Players, "Add a friend's name", 170., cx))
+            .child(add);
+        let hint = if typed.is_empty() {
+            None
+        } else if !valid {
+            Some("Use a Minecraft name: 3 to 16 letters, numbers or underscores.")
+        } else if duplicate {
+            Some("That player is already on the list.")
+        } else {
+            None
+        };
         chips.child(
             div()
                 .flex()
-                .items_center()
-                .h(px(44.))
-                .pr(px(6.))
-                .rounded(px(radius::ROW))
-                .bg(white(if focused { fill::BUTTON } else { 0.04 }))
-                .child(self.field(Field::Players, "Add a friend's name", 170., cx))
-                .child(add),
+                .flex_col()
+                .gap(px(4.))
+                .child(input)
+                .children(hint.map(|message| {
+                    ui::text(12., FontWeight::NORMAL, ink::QUIET)
+                        .child(tr(message))
+                        .into_any_element()
+                })),
         )
     }
 
@@ -691,7 +714,7 @@ impl Launcher {
         let Some(c) = &mut self.servers.create else {
             return;
         };
-        if valid_name(&typed) && !c.friends.contains(&typed) {
+        if valid_name(&typed) && !has_friend(&c.friends, &typed) {
             c.friends.push(typed);
             self.servers.text(Field::Players).set(String::new());
         }
@@ -870,15 +893,17 @@ impl Launcher {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_name;
+    use super::{has_friend, valid_name};
 
     #[test]
-    fn friend_names_follow_minecrafts_rules() {
+    fn friend_names_follow_minecrafts_rules_and_are_unique() {
         assert!(valid_name("Player46008"));
         assert!(valid_name("oak_leaf"));
         assert!(!valid_name("ab"));
         assert!(!valid_name("seventeen_letters"));
         assert!(!valid_name("no spaces"));
         assert!(!valid_name("dash-name"));
+        assert!(has_friend(&["Alex".into()], "alex"));
+        assert!(!has_friend(&["Alex".into()], "Steve"));
     }
 }

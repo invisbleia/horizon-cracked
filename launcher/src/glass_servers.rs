@@ -174,7 +174,6 @@ impl Launcher {
             let restart = ui::quiet("server-restart", tr("Restart"), 44., &t).px(px(20.));
             buttons = buttons.child(if idle {
                 restart.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.servers.restart_needed.clear();
                     this.server_command("Restarting", vec!["restart".into()]);
                     cx.notify();
                 }))
@@ -384,7 +383,6 @@ impl Launcher {
                 )
                 .child(if idle {
                     restart.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.servers.restart_needed.clear();
                         this.server_command("Restarting", vec!["restart".into()]);
                         cx.notify();
                     }))

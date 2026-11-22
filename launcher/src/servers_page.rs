@@ -641,8 +641,11 @@ impl Launcher {
                 }
             }
             Event::Done(result) => {
-                s.busy = None;
+                let completed = s.busy.take();
                 s.polled = None;
+                if completed.as_deref() == Some("Restarting") && result.is_ok() {
+                    s.restart_needed.clear();
+                }
                 match result {
                     Ok(note) if !note.is_empty() => s.note = Some(note),
                     Ok(_) => {}
@@ -810,7 +813,6 @@ impl Launcher {
             return;
         };
         STARTED_HERE.lock().unwrap().push(dir.clone());
-        self.servers.restart_needed.clear();
         self.server_job("Starting", move |log| {
             log("A new world takes a minute the first time".into());
             servers::run_streamed(&dir, &["start"], log).map(|_| String::new())
@@ -1624,7 +1626,6 @@ impl Launcher {
         let restart = big(button("server-restart", "Restart", Kind::Secondary, &t));
         let restart = if idle && running {
             restart.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.servers.restart_needed.clear();
                 this.server_command("Restarting", vec!["restart".into()]);
                 cx.notify();
             }))
@@ -1730,7 +1731,6 @@ impl Launcher {
                             button("restart-apply", "Restart now", Kind::Secondary, &t).bg(t.plate);
                         if idle {
                             b.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.servers.restart_needed.clear();
                                 this.server_command("Restarting", vec!["restart".into()]);
                                 cx.notify();
                             }))
